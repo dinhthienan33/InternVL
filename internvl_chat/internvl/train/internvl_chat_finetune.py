@@ -816,6 +816,20 @@ def main():
 
     training_args.use_packed_ds = data_args.use_packed_ds
 
+    # save_strategy=epoch/steps + save_total_limit=1 means "keep one checkpoint" — skip
+    # intermediate checkpoint-* writes and only call trainer.save_model() after the last epoch.
+    if (
+        training_args.do_train
+        and training_args.save_total_limit == 1
+        and str(training_args.save_strategy).lower() in {'epoch', 'steps'}
+    ):
+        logger.info(
+            'save_strategy=%s with save_total_limit=1: intermediate checkpoints disabled; '
+            'the final model will be written to output_dir after training completes.',
+            training_args.save_strategy,
+        )
+        training_args.save_strategy = 'no'
+
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
     # send_example_telemetry('InternV-Chat', model_args, data_args)
