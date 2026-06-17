@@ -32,13 +32,11 @@ from internvl.model.internvl_chat import (InternVisionConfig,
                                           InternVisionModel,
                                           InternVLChatConfig,
                                           InternVLChatModel)
-from internvl.patch import (concat_pad_data_collator,
-                            replace_internlm2_attention_class,
-                            replace_llama_attention_class,
-                            replace_llama_rmsnorm_with_fused_rmsnorm,
-                            replace_phi3_attention_class,
-                            replace_qwen2_attention_class,
-                            replace_train_dataloader, replace_train_sampler)
+from internvl.patch.pad_data_collator import concat_pad_data_collator
+from internvl.patch.llama_rmsnorm_monkey_patch import \
+    replace_llama_rmsnorm_with_fused_rmsnorm
+from internvl.patch.train_dataloader_patch import replace_train_dataloader
+from internvl.patch.train_sampler_patch import replace_train_sampler
 from internvl.train.constants import (BOX_END_TOKEN, BOX_START_TOKEN,
                                       IMG_CONTEXT_TOKEN, IMG_END_TOKEN,
                                       IMG_START_TOKEN, QUAD_END_TOKEN,
@@ -795,6 +793,24 @@ def len2weight(x, loss_reduction):
     raise NotImplementedError(loss_reduction)
 
 
+def resolve_attn_implementation():
+    try:
+        import flash_attn  # noqa: F401
+        return 'flash_attention_2'
+    except ImportError:
+        logger.warning('flash_attn is not installed; using eager attention for training.')
+        return 'eager'
+
+
+def apply_llm_attn_implementation(llm_config):
+    attn_impl = resolve_attn_implementation()
+    if getattr(llm_config, 'model_type', None) == 'internlm2':
+        llm_config.attn_implementation = attn_impl
+    else:
+        llm_config._attn_implementation = attn_impl
+    logger.info(f'Using {attn_impl} for LLM attention')
+
+
 def main():
     # Apply necessary patches for the transformers library
     replace_llama_rmsnorm_with_fused_rmsnorm()
@@ -890,6 +906,14 @@ def main():
     tcs_loader = TCSLoader('~/petreloss.conf') if has_tcs_loader else None
 
     if data_args.use_packed_ds:
+        from internvl.patch.internlm2_packed_training_patch import \
+            replace_internlm2_attention_class
+        from internvl.patch.llama_packed_training_patch import \
+            replace_llama_attention_class
+        from internvl.patch.phi3_packed_training_patch import \
+            replace_phi3_attention_class
+        from internvl.patch.qwen2_packed_training_patch import \
+            replace_qwen2_attention_class
         replace_internlm2_attention_class()
         replace_qwen2_attention_class()
         replace_phi3_attention_class()
@@ -907,12 +931,7 @@ def main():
         logger.info('Loading InternVLChatModel...')
         config = InternVLChatConfig.from_pretrained(model_args.model_name_or_path)
         config.vision_config.drop_path_rate = model_args.drop_path_rate
-        if config.llm_config.model_type == 'internlm2':
-            config.llm_config.attn_implementation = 'flash_attention_2'  # for InternLM
-            logger.info('Using flash_attention_2 for InternLM')
-        else:
-            config.llm_config._attn_implementation = 'flash_attention_2'  # for LLaMA
-            logger.info('Using flash_attention_2 for LLaMA')
+        apply_llm_attn_implementation(config.llm_config)
         config.template = data_args.conv_style
         config.select_layer = model_args.vision_select_layer
         config.dynamic_image_size = data_args.dynamic_image_size
@@ -932,12 +951,9 @@ def main():
         llm_config = AutoConfig.from_pretrained(model_args.llm_path, trust_remote_code=True)
         if llm_config.model_type == 'internlm2':
             model_type = InternLM2ForCausalLM
-            llm_config.attn_implementation = 'flash_attention_2'  # for InternLM
-            logger.info('Using flash_attention_2 for InternLM')
         else:
             model_type = AutoModelForCausalLM
-            llm_config._attn_implementation = 'flash_attention_2'  # for LLaMA
-            logger.info('Using flash_attention_2 for LLaMA')
+        apply_llm_attn_implementation(llm_config)
         llm = model_type.from_pretrained(
             model_args.llm_path, torch_dtype=torch.bfloat16,
             config=llm_config, trust_remote_code=True)
