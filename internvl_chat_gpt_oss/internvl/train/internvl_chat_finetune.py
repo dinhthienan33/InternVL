@@ -1050,7 +1050,11 @@ def main():
     if model_args.grad_checkpoint:
         model.vision_model.gradient_checkpointing = True
         model.vision_model.encoder.gradient_checkpointing = True
-        model.language_model._set_gradient_checkpointing()
+        if hasattr(model.language_model, '_set_gradient_checkpointing'):
+            model.language_model._set_gradient_checkpointing()
+        else:
+            # HF CausalLM models (e.g. Qwen3) expose gradient_checkpointing_enable()
+            model.language_model.gradient_checkpointing_enable()
         logger.info('gradient_checkpointing is enabled')
 
     train_dataset = build_datasets(

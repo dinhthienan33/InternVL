@@ -18,6 +18,7 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 from transformers import AutoModelForCausalLM
 from transformers.models.gpt_oss.modeling_gpt_oss import load_balancing_loss_func
+from peft import LoraConfig, get_peft_model
 
 from .configuration_internvl_chat import InternVLChatConfig
 from .conversation import get_conv_template
@@ -82,6 +83,9 @@ class InternVLChatModel(PreTrainedModel):
             self.language_model = AutoModelForCausalLM.from_config(config.llm_config)
             logger.info(f"language_model type: {type(self.language_model)}")
 
+        llm_architectures = getattr(config.llm_config, 'architectures', None)
+        self.llm_arch_name = llm_architectures[0] if llm_architectures else None
+
         vit_hidden_size = config.vision_config.hidden_size
         llm_hidden_size = config.llm_config.hidden_size
 
@@ -96,6 +100,38 @@ class InternVLChatModel(PreTrainedModel):
         self.img_context_token_id = None
         self.conv_template = get_conv_template(self.template)
         self.system_message = self.conv_template.system_message
+
+    def wrap_backbone_lora(self, r=128, lora_alpha=256, lora_dropout=0.05):
+        lora_config = LoraConfig(
+            r=r,
+            target_modules=['attn.qkv', 'attn.proj', 'mlp.fc1', 'mlp.fc2'],
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+        )
+        self.vision_model = get_peft_model(self.vision_model, lora_config)
+        self.vision_model.print_trainable_parameters()
+
+    def wrap_llm_lora(self, r=128, lora_alpha=256, lora_dropout=0.05):
+        # Determine the target modules based on the architecture of the language model
+        if self.llm_arch_name == 'InternLM2ForCausalLM':
+            target_modules = ['attention.wqkv', 'attention.wo', 'feed_forward.w1', 'feed_forward.w2', 'feed_forward.w3']
+        elif self.llm_arch_name == 'Phi3ForCausalLM':
+            target_modules = ['mlp.down_proj', 'mlp.gate_up_proj', 'self_attn.o_proj', 'self_attn.qkv_proj']
+        elif self.llm_arch_name in ['Qwen2ForCausalLM', 'Qwen3ForCausalLM', 'LlamaForCausalLM']:
+            target_modules = ['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
+                              'mlp.gate_proj', 'mlp.down_proj', 'mlp.up_proj']
+        else:
+            raise NotImplementedError(f'Unsupported llm architecture for LoRA: {self.llm_arch_name}')
+        lora_config = LoraConfig(
+            r=r,
+            target_modules=target_modules,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            task_type='CAUSAL_LM',
+        )
+        self.language_model = get_peft_model(self.language_model, lora_config)
+        self.language_model.enable_input_require_grads()
+        self.language_model.print_trainable_parameters()
 
     def forward(
             self,
